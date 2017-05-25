@@ -41,10 +41,10 @@
 # Change these settings to suit #
 # your server configuration     #
 #################################
-DB_HOST=127.0.0.1
-DB_USER=root
-DB_PASS=admin
-DB_PORT=3306
+DB_HOST=
+DB_USER=
+DB_PASS=
+DB_PORT=
 DB_SOCKET=
 
 # If we're running on a Debian family we can use the maintenance account.
@@ -159,7 +159,7 @@ MYSQL_CLIENT_VERSION=`${MYSQL_BIN} -V|${SED_BIN} -e 's/.*Distrib \([0-9.]*\).*/\
 # -f will be added if IGNORE_SQL_ERRORS is "yes"
 # -C will be added if USE_COMPRESSION is "yes"
 MYSQL_OPTS="-B -r -N"
-MYSQLDUMP_OPTS="--opt --skip-comments"
+MYSQLDUMP_OPTS="--opt --skip-comments --default-character-set=utf8 --single-transaction"
 if [ "${MYSQL_CLIENT_VERSION}" \> "5" ]; then
 	MYSQLDUMP_OPTS="$MYSQLDUMP_OPTS --routines --triggers"
 fi
@@ -206,7 +206,7 @@ fi
 #############################
 
 # Script version
-VERSION="1.5"
+VERSION="1.1"
 
 # File that is being written by the script. Will be deleted
 # on receiving SIGINT or SIGTERM, since it won't be valid
@@ -344,7 +344,7 @@ print_version()
 #########################################
 # Part 3 : Process command-line options #
 #########################################
-while getopts "bmhvlH:S:u:p:P:d:n:c" option
+while getopts "bmhvlH:S:u:p:P:d:n:c:" option
 do
 	case $option in
 		v)	# Version
@@ -390,7 +390,6 @@ do
 			;;
 	esac
 done
-
 # Parse config file if necessary
 if [ -e "$CONFIG_FILE" -a -r "$CONFIG_FILE" ]; then
 	source $CONFIG_FILE &> $TRASH
@@ -439,7 +438,7 @@ MYSQLDUMP_OPTS="${MYSQLDUMP_OPTS} ${IDENT_OPTS}"
 
 # Shortcuts
 MYSQL="${MYSQL_BIN} ${MYSQL_OPTS}"
-MYSQLDUMP="${MYSQLDUMP_BIN} ${MYSQLDUMP_OPTS}"
+MYSQLDUMP="${MYSQLDUMP_BIN} --max_allowed_packet=512M ${MYSQLDUMP_OPTS}"
 RM="${RM_BIN} ${RM_OPTS}"
 LN="${LN_BIN} ${LN_OPTS}"
 CP="${CP_BIN} ${CP_OPTS}"
@@ -496,6 +495,13 @@ check_parameters()
 log_folder()
 {
 	local log_folder="${BACKUP_DIR}/${BACKUP_HOST_NAME}"
+
+	if [  -z "${LOG_DIR}" ]; then
+		log_folder="${BACKUP_DIR}/${BACKUP_HOST_NAME}"
+	else
+		log_folder="${LOG_DIR}/${BACKUP_HOST_NAME}"
+        fi
+
 	if [ ! -z "${CURRENT_DATABASE}" ]; then
 		log_folder="${log_folder}/${CURRENT_DATABASE}"
 	fi
@@ -610,7 +616,7 @@ show_maintenance_databases()
 		local databases=`show_all_databases`
 		local db=''
 		for db in ${IGNORE_MAINTENANCE_DATABASES}; do
-			databases=`echo ${databases}|${SED} "s/\b${db}\b//g"`
+			databases=`echo ${databases}|${SED} "s/${db}//g"`
 		done;
 		echo $databases
 	fi
@@ -627,7 +633,7 @@ show_backup_databases()
 		local databases=`show_all_databases`
 		local db=''
 		for db in ${IGNORE_BACKUP_DATABASES}; do
-			databases=`echo ${databases}|${SED} "s/\b${db}\b//g"`
+			databases=`echo ${databases}|${SED} "s/${db}//g"`
 		done;
 		echo $databases
 	fi
@@ -641,7 +647,6 @@ show_backup_databases()
 show_tables()
 {
 	local database=$1
-
 	is_mysql_5
 	if [ $? -eq 0 ]; then
 		echo `${MYSQL} -e "SELECT TABLE_NAME FROM TABLES WHERE TABLE_SCHEMA = '${database}' AND TABLE_TYPE = 'BASE TABLE'" information_schema`
@@ -668,24 +673,27 @@ db_maintenance()
 {
 	local database=$1
 	log_m "Maintenance started on database ${database}"
+
 	for i in `show_tables $database`; do
 			local quotedTableName=`quote_identifier $i`
-			local msg_text=`${MYSQL} -e "CHECK TABLE $quotedTableName" -E $1|${GREP} Msg_text |${CUT} -d' ' -f2`
+			#local msg_text=`${MYSQL} -e "CHECK TABLE $quotedTableName" -E $1|${GREP} Msg_text |${CUT} -d' ' -f2`
+			local msg_text=`${MYSQL} -e "CHECK TABLE $quotedTableName" -E $1| tail -n 1`
+
 			echo "	$i : ${msg_type} ...${msg_text}"
 			local log_message="Checking table ${i}..."
 			if [ "$msg_text" != "OK" ]; then
 				log_message="${log_message} ${msg_text}"
 				echo "		Repairing table $i"
-				${MYSQL} -e "REPAIR TABLE $quotedTableName EXTENDED" $1 &> ${TRASH}
+				# ${MYSQL} -e "REPAIR TABLE $quotedTableName EXTENDED" $1 &> ${TRASH}
 			else
 				log_message="${log_message} OK"
 			fi;
 			log_m "${log_message}"
 			log_m "Optimizing table $i"
-			${MYSQL} -e "OPTIMIZE TABLE $quotedTableName" $1 > ${TRASH}
+			#${MYSQL} -e "OPTIMIZE TABLE $quotedTableName" $1 > ${TRASH}
 
 			log_m "Analyzing table $i"
-			${MYSQL} -e "ANALYZE TABLE $quotedTableName" $1 > ${TRASH}
+			#${MYSQL} -e "ANALYZE TABLE $quotedTableName" $1 > ${TRASH}
 	done
 	log_m "Maintenance complete on database ${database}"
 }
