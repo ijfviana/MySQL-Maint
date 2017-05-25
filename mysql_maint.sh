@@ -684,16 +684,16 @@ db_maintenance()
 			if [ "$msg_text" != "OK" ]; then
 				log_message="${log_message} ${msg_text}"
 				echo "		Repairing table $i"
-				# ${MYSQL} -e "REPAIR TABLE $quotedTableName EXTENDED" $1 &> ${TRASH}
+				${MYSQL} -e "REPAIR TABLE $quotedTableName EXTENDED" $1 &> ${TRASH}
 			else
 				log_message="${log_message} OK"
 			fi;
 			log_m "${log_message}"
 			log_m "Optimizing table $i"
-			#${MYSQL} -e "OPTIMIZE TABLE $quotedTableName" $1 > ${TRASH}
+			${MYSQL} -e "OPTIMIZE TABLE $quotedTableName" $1 > ${TRASH}
 
 			log_m "Analyzing table $i"
-			#${MYSQL} -e "ANALYZE TABLE $quotedTableName" $1 > ${TRASH}
+			${MYSQL} -e "ANALYZE TABLE $quotedTableName" $1 > ${TRASH}
 	done
 	log_m "Maintenance complete on database ${database}"
 }
