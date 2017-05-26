@@ -181,6 +181,9 @@ TRASH="/dev/null"
 # Configuration file
 CONFIG_FILE=''
 
+#STATUS
+LAST_STATUS=0
+LAST_MSG=""
 # What should the script do ?
 # don't modify here, use -b (backup) or -m (maintenance) command-line options
 DO_MAINTENANCE=0
@@ -357,6 +360,14 @@ do
 			;;
 		c)	# Config file
 			CONFIG_FILE=$OPTARG
+			# Parse config file if necessary
+			if [ -e "$CONFIG_FILE" -a -r "$CONFIG_FILE" ]; then
+				source $CONFIG_FILE &> $TRASH
+				if [ "0" -ne "$?" ]; then
+					ECHO_FAIL "Failed to parse $CONFIG_FILE"
+					end_script E_PARSE_CONFIG
+				fi
+			fi
 			;;
 		b)	# Backup
 			DO_BACKUP=1
@@ -390,14 +401,7 @@ do
 			;;
 	esac
 done
-# Parse config file if necessary
-if [ -e "$CONFIG_FILE" -a -r "$CONFIG_FILE" ]; then
-	source $CONFIG_FILE &> $TRASH
-	if [ "0" -ne "$?" ]; then
-		ECHO_FAIL "Failed to parse $CONFIG_FILE"
-		end_script E_PARSE_CONFIG
-	fi
-fi
+
 
 if [ -z ${BACKUP_HOST_NAME} ]; then
 	BACKUP_HOST_NAME=$DB_HOST
@@ -438,7 +442,7 @@ MYSQLDUMP_OPTS="${MYSQLDUMP_OPTS} ${IDENT_OPTS}"
 
 # Shortcuts
 MYSQL="${MYSQL_BIN} ${MYSQL_OPTS}"
-MYSQLDUMP="${MYSQLDUMP_BIN} --max_allowed_packet=512M ${MYSQLDUMP_OPTS}"
+MYSQLDUMP="${MYSQLDUMP_BIN}  ${MYSQLDUMP_OPTS}"
 RM="${RM_BIN} ${RM_OPTS}"
 LN="${LN_BIN} ${LN_OPTS}"
 CP="${CP_BIN} ${CP_OPTS}"
@@ -648,6 +652,7 @@ show_tables()
 {
 	local database=$1
 	is_mysql_5
+
 	if [ $? -eq 0 ]; then
 		echo `${MYSQL} -e "SELECT TABLE_NAME FROM TABLES WHERE TABLE_SCHEMA = '${database}' AND TABLE_TYPE = 'BASE TABLE'" information_schema`
 	else
@@ -665,6 +670,107 @@ quote_identifier()
 	echo '`'$1'`'
 }
 
+########################################################
+# Returns if a table is innodb                         #
+#                                                      #
+# $1 : the schema                                      #
+# $2 : the table                                       #
+########################################################
+
+is_innodb()
+{
+	local database=$1
+	local table=$2
+	local sql="SELECT engine, table_schema, table_name FROM INFORMATION_SCHEMA.TABLES WHERE engine = 'innodb' AND table_schema='${database}'  AND table_name='${table}' "
+
+	echo `${MYSQL} -e "$sql"`
+
+}
+
+########################################################
+# Exec SQL query and returns if failed                 #
+#                                                      #
+# $1 : the qury                                        #
+# $2 : the schema                                      #
+########################################################
+
+exec_mysql()
+{
+	local msg_text=`${MYSQL} -e "$1" $2`
+	local msg_text_status=`echo $msg_text |${GREP} status |${CUT} -d' ' -f4`
+	local msg_text_note=`echo $msg_text|${GREP} note |${CUT} -d' ' -f4`
+
+	if [ "$msg_text_status" != "OK" ]; then
+		ok=1
+	else
+		ok=0
+	fi
+
+	echo $ok
+}
+
+########################################################
+# Exec Maintence query and returns if failed           #
+#                                                      #
+# $1 : action                                          #
+# $2 : tablename                                       #
+# $3 : dbname                                          #
+########################################################
+
+exec_mysql_cmd_m()
+{
+	local ok=0
+	local tablename=$2
+	local quotedTableName=`quote_identifier $tablename`
+	local dbname=$3
+	local check_innodb=0
+	
+
+	if [ "$1" == "Checking" ] ; then
+		sql="CHECK TABLE $quotedTableName"
+	fi
+
+	if [ "$1" == "Reparing" ] ; then
+		check_innodb=1
+		sql="REPAIR TABLE $quotedTableName EXTENDED"
+	fi
+
+	if [ "$1" == "Optimizing" ] ; then
+		check_innodb=1
+		sql="OPTIMIZE TABLE $quotedTableName"
+	fi
+
+	if [ "$1" == "Analyzing" ] ; then
+		sql="ANALYZE TABLE $quotedTableName"
+	fi
+
+	local log_message="$1 table $tablename..."
+
+	if [ $check_innodb -eq "1" ] ; then
+		msg_text=$(is_innodb "$dbname" "$tablename")
+	else
+		msg_text=""
+	fi
+
+
+	if [ -z "$msg_text" ]; then
+		msg_text=$(exec_mysql  "$sql" $dbname)
+
+		if [ "$msg_text" != "0" ]; then
+			ok=1
+			log_message="${log_message} ERROR"
+		else
+			log_message="${log_message} OK"
+		fi
+	else
+		log_message="${log_message}, innodb not supported"
+	fi
+
+	log_m "${log_message}"
+
+	LAST_STATUS=$ok
+}
+
 ####################################
 # Starts maintenance on a database #
 # $1 : database name               #
@@ -672,30 +778,53 @@ quote_identifier()
 db_maintenance()
 {
 	local database=$1
+	local ok=0
 	log_m "Maintenance started on database ${database}"
 
 	for i in `show_tables $database`; do
+
 			local quotedTableName=`quote_identifier $i`
-			#local msg_text=`${MYSQL} -e "CHECK TABLE $quotedTableName" -E $1|${GREP} Msg_text |${CUT} -d' ' -f2`
-			local msg_text=`${MYSQL} -e "CHECK TABLE $quotedTableName" -E $1| tail -n 1`
+			echo "	$i : "
+			
+			# Check and repair
 
-			echo "	$i : ${msg_type} ...${msg_text}"
-			local log_message="Checking table ${i}..."
-			if [ "$msg_text" != "OK" ]; then
-				log_message="${log_message} ${msg_text}"
-				echo "		Repairing table $i"
-				${MYSQL} -e "REPAIR TABLE $quotedTableName EXTENDED" $1 &> ${TRASH}
-			else
-				log_message="${log_message} OK"
-			fi;
-			log_m "${log_message}"
-			log_m "Optimizing table $i"
-			${MYSQL} -e "OPTIMIZE TABLE $quotedTableName" $1 > ${TRASH}
+			exec_mysql_cmd_m "Checking" "$i" "${database}"
+			
+			if [ $LAST_STATUS -ne "0" ] ; then
+				ECHO_FAIL "An error occurred while checking table  $quotedTableName"
+				exec_mysql_cmd_m "Reparing" "$i" "${database}"
+				
+				if [ $LAST_STATUS -ne "0" ] ; then
+					ECHO_FAIL "An error occurred while reparing table  $quotedTableName"
+					ok=1
+				fi
+			fi
 
-			log_m "Analyzing table $i"
-			${MYSQL} -e "ANALYZE TABLE $quotedTableName" $1 > ${TRASH}
+			# Optimize
+
+			exec_mysql_cmd_m "Optimizing" "$i" "${database}"
+			
+			if [ $LAST_STATUS -ne "0" ] ; then
+				ECHO_FAIL "An error occurred while optimizing table  $quotedTableName"
+				ok=1
+			fi
+
+			exec_mysql_cmd_m "Analyzing" "$i" "${database}"
+			
+			if [ $LAST_STATUS -ne "0" ] ; then
+				ECHO_FAIL "An error occurred while analyzing table  $quotedTableName"
+				ok=1
+			fi
 	done
-	log_m "Maintenance complete on database ${database}"
+
+	
+	if [ $ok -eq "0" ] ; then
+		log_m "Maintenance completed on database ${database}"
+	else
+		log_m "Maintenance completed on database ${database} with errors"
+	fi
+
+	LAST_STATUS=$ok
 }
 
 ###################################################################
@@ -703,13 +832,31 @@ db_maintenance()
 ###################################################################
 do_maintenance()
 {
+	local ok=0
+
 	for db in `show_maintenance_databases`; do
 		CURRENT_DATABASE=$db
 		ECHO_OK "======== Maintenance started on database $db ========"
 		db_maintenance $db
+		lok=$LAST_STATUS
+
+		if [ "0" -ne "$lok" ]; then
+			ok=1
+		fi
+
 		rotate_maintenance_log
 		CURRENT_DATABASE=""
 	done;
+
+	if [ $ok -eq "0" ] ; then
+		ECHO_OK "Maintenance completed "
+		log_m "Maintenance completed "
+	else
+		ECHO_FAIL "Maintenance completed with errors"
+		log_m "Maintenance completed with errors"
+	fi
+
+	LAST_STATUS=$ok
 }
 
 ######################
@@ -718,6 +865,7 @@ do_maintenance()
 ######################
 db_backup()
 {
+	local ok=0
 	local database=$1
 	log_b "Backup started on database ${database}"
 	local dir=${BACKUP_BASE}/${database}
@@ -750,7 +898,9 @@ db_backup()
 
 	# current
 	CURRENT_FILE=$filename
+
 	${MYSQLDUMP} $db > ${TEMP_FILE} 2> ${TRASH}
+
 	if [ "0" -eq "$?" ]; then
 		cat ${TEMP_FILE}|${BZIP2} > $filename
 
@@ -802,10 +952,13 @@ db_backup()
 		echo "	*** Deleting old backup of database ${database} ***"
 		delete_old_backups $database
 	else
+		ok=1
 		CURRENT_FILE=''
 		ECHO_FAIL "An error occurred while backing up ${db}"
 		log_b "An error occurred while backing up $db"
 	fi
+
+	LAST_STATUS=$ok
 }
 
 #################################################
@@ -813,12 +966,30 @@ db_backup()
 #################################################
 do_backup()
 {
+	local ok=0
+
 	for db in `show_backup_databases`; do
 		CURRENT_DATABASE=$db
+		ECHO_OK "======== Backup started on database $db ========"
 		db_backup $db
+
+		lok=$LAST_STATUS
+
+		if [ "0" -ne "$lok" ]; then
+			ok=1
+		fi
+
 		rotate_backup_log
 		CURRENT_DATABASE=""
 	done;
+
+	if [ $ok -eq "0" ] ; then
+		log_b "Backup completed "
+	else
+		log_b "Backup completed with errors"
+	fi
+	
+	LAST_STATUS=$ok
 }
 
 #######################
@@ -908,6 +1079,8 @@ if [ "$DO_MAINTENANCE" -eq "1" ]; then
 	echo "	******** Maintenance started ********"
 	echo "	*************************************"
 	do_maintenance
+	E_OK=$LAST_STATUS
+	exit
 fi
 
 if [ "$DO_BACKUP" -eq "1" ]; then
@@ -916,6 +1089,8 @@ if [ "$DO_BACKUP" -eq "1" ]; then
 	echo "	******** Backup started ********"
 	echo "	********************************"
 	do_backup
+	E_OK=$LAST_STATUS
+	exit 
 fi
 
 if [ "$running" -eq "0" ]; then
